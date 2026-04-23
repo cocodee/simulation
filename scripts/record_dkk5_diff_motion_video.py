@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Simulate a DKK scene, drive RJ2506 wheels and arms, and encode a motion video."""
+"""Record a DKK5 motion video using a differential controller for the mobile base."""
 
 from __future__ import annotations
 
@@ -37,20 +37,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default="/root/data1/kdi/workspace/sim1/outputs/dkk_5_motion_frames",
+        required=True,
         help="Directory where Replicator BasicWriter will write rgb_*.png frames.",
     )
-    parser.add_argument(
-        "--video",
-        default="/root/data1/kdi/workspace/sim1/outputs/dkk_5_motion_video.mp4",
-        help="MP4 output path.",
-    )
-    parser.add_argument(
-        "--manifest",
-        default="/root/data1/kdi/workspace/sim1/outputs/dkk_5_motion_manifest.json",
-        help="JSON manifest path.",
-    )
-    parser.add_argument("--frames", type=int, default=144)
+    parser.add_argument("--video", required=True, help="MP4 output path.")
+    parser.add_argument("--manifest", required=True, help="JSON manifest path.")
+    parser.add_argument("--frames", type=int, default=480)
     parser.add_argument("--warmup-steps", type=int, default=30)
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
@@ -62,8 +54,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--robot-prim", default="/World/DKK2/RJ2506/base_link")
     parser.add_argument("--dome-intensity", type=float, default=1800.0)
     parser.add_argument("--sun-intensity", type=float, default=900.0)
-    parser.add_argument("--wheel-speed", type=float, default=7.5, help="Drive wheel angular speed in rad/s.")
-    parser.add_argument("--turn-speed", type=float, default=3.6, help="Wheel angular speed used for turning phases.")
+    parser.add_argument(
+        "--wheel-speed",
+        type=float,
+        default=1.5,
+        help="Nominal wheel angular speed in rad/s. Straight-line linear speed is derived from this.",
+    )
+    parser.add_argument(
+        "--angular-speed",
+        type=float,
+        default=0.0,
+        help="Desired base angular speed in rad/s for the differential controller.",
+    )
+    parser.add_argument(
+        "--wheel-radius",
+        type=float,
+        default=0.075,
+        help="Drive wheel radius in meters.",
+    )
+    parser.add_argument(
+        "--wheel-base",
+        type=float,
+        default=0.6284,
+        help="Distance between left and right drive wheels in meters.",
+    )
+    parser.add_argument(
+        "--max-wheel-speed",
+        type=float,
+        default=2.5,
+        help="Maximum wheel speed clamp applied by the differential controller in rad/s.",
+    )
+    parser.add_argument(
+        "--settle-seconds",
+        type=float,
+        default=5.0,
+        help="Seconds to keep the robot stationary at the start of the recorded video.",
+    )
+    parser.add_argument("--animate-arms", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--active-gpu", type=int, default=0)
     parser.add_argument("--multi-gpu", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True)
@@ -89,6 +116,7 @@ import omni.timeline  # noqa: E402
 from isaacsim.core.api import World  # noqa: E402
 from isaacsim.core.api.robots import Robot  # noqa: E402
 from isaacsim.core.utils.types import ArticulationAction  # noqa: E402
+from isaacsim.robot.wheeled_robots.controllers.differential_controller import DifferentialController  # noqa: E402
 from pxr import Sdf, UsdGeom  # noqa: E402
 
 
@@ -101,10 +129,11 @@ FINGER_JOINTS = [
     "right_hand_finger2_joint",
 ]
 WHEEL_JOINTS = ["left_wheel_joint", "right_wheel_joint"]
+WHEEL_VELOCITY_SIGNS = {"left_wheel_joint": -1.0, "right_wheel_joint": 1.0}
 
 
 def log(message: str) -> None:
-    print(f"[dkk2_motion] {message}", flush=True)
+    print(f"[dkk5_diff_motion] {message}", flush=True)
 
 
 def configure_render_settings() -> None:
@@ -200,10 +229,6 @@ def safe_float_list(values) -> list[float | None]:
     return result
 
 
-def finite_or_none(values) -> list[float | None]:
-    return safe_float_list(values)
-
-
 def build_motion_targets(robot: Robot) -> dict[str, object]:
     dof_names = list(robot.dof_names)
     dof_count = len(dof_names)
@@ -237,18 +262,6 @@ def configure_control_modes(robot: Robot, motion: dict[str, object]) -> None:
         controller.switch_dof_control_mode(joint_index[name], "position")
 
 
-def wheel_command(phase: float) -> tuple[float, float]:
-    if phase < 0.42:
-        return args.wheel_speed, args.wheel_speed
-    if phase < 0.50:
-        return -args.turn_speed, args.turn_speed
-    if phase < 0.82:
-        return -args.wheel_speed, -args.wheel_speed
-    if phase < 0.90:
-        return args.turn_speed, -args.turn_speed
-    return args.wheel_speed, args.wheel_speed
-
-
 def arm_targets(phase: float, motion: dict[str, object]) -> np.ndarray:
     joint_index = motion["joint_index"]
     initial_positions = motion["initial_positions"]
@@ -256,28 +269,31 @@ def arm_targets(phase: float, motion: dict[str, object]) -> np.ndarray:
     upper_limits = motion["upper_limits"]
     targets = np.array(initial_positions, copy=True)
 
+    if not args.animate_arms:
+        return clamp(targets, lower_limits, upper_limits)
+
     theta = 2.0 * math.pi * phase
     secondary = 4.0 * math.pi * phase
 
     left_offsets = np.array(
         [
-            0.30 * math.sin(theta),
-            -0.45 + 0.20 * math.sin(theta),
-            0.35 * math.sin(theta + 0.8),
-            -0.25 + 0.18 * math.sin(secondary),
-            0.22 * math.cos(theta),
-            0.18 * math.sin(theta + 1.2),
+            0.20 * math.sin(theta),
+            -0.20 + 0.08 * math.sin(theta),
+            0.14 * math.sin(theta + 0.8),
+            -0.10 + 0.06 * math.sin(secondary),
+            0.12 * math.cos(theta),
+            0.10 * math.sin(theta + 1.2),
         ],
         dtype=np.float64,
     )
     right_offsets = np.array(
         [
-            -0.30 * math.sin(theta),
-            -0.45 + 0.18 * math.sin(theta + 0.5),
-            -0.35 * math.sin(theta + 0.8),
-            0.25 - 0.18 * math.sin(secondary),
-            -0.22 * math.cos(theta),
-            -0.18 * math.sin(theta + 1.2),
+            -0.20 * math.sin(theta),
+            -0.20 + 0.08 * math.sin(theta + 0.5),
+            -0.14 * math.sin(theta + 0.8),
+            0.10 - 0.06 * math.sin(secondary),
+            -0.12 * math.cos(theta),
+            -0.10 * math.sin(theta + 1.2),
         ],
         dtype=np.float64,
     )
@@ -290,22 +306,46 @@ def arm_targets(phase: float, motion: dict[str, object]) -> np.ndarray:
         index = joint_index[name]
         targets[index] = initial_positions[index] + offset
 
-    open_amount = 0.018 + 0.008 * (0.5 + 0.5 * math.sin(theta))
+    open_amount = 0.018 + 0.004 * (0.5 + 0.5 * math.sin(theta))
     for name in FINGER_JOINTS:
         targets[joint_index[name]] = open_amount
 
     return clamp(targets, lower_limits, upper_limits)
 
 
-def apply_motion(robot: Robot, frame_index: int, frame_count: int, motion: dict[str, object]) -> tuple[np.ndarray, np.ndarray]:
-    phase = frame_index / max(frame_count - 1, 1)
+def build_drive_command() -> np.ndarray:
+    linear_speed = args.wheel_speed * args.wheel_radius
+    return np.array([linear_speed, args.angular_speed], dtype=np.float64)
+
+
+def apply_motion(
+    robot: Robot,
+    frame_index: int,
+    frame_count: int,
+    motion: dict[str, object],
+    diff_controller: DifferentialController,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    settle_frames = min(frame_count, max(0, int(round(args.settle_seconds * args.fps))))
+    active_frames = max(frame_count - settle_frames, 1)
+    active_index = max(frame_index - settle_frames, 0)
+    phase = active_index / max(active_frames - 1, 1)
     positions = np.full(motion["dof_count"], np.nan, dtype=np.float64)
     velocities = np.full(motion["dof_count"], np.nan, dtype=np.float64)
     joint_index = motion["joint_index"]
 
-    left_speed, right_speed = wheel_command(phase)
-    velocities[joint_index["left_wheel_joint"]] = left_speed
-    velocities[joint_index["right_wheel_joint"]] = right_speed
+    if frame_index < settle_frames:
+        drive_command = np.array([0.0, 0.0], dtype=np.float64)
+        velocities[joint_index["left_wheel_joint"]] = 0.0
+        velocities[joint_index["right_wheel_joint"]] = 0.0
+    else:
+        drive_command = build_drive_command()
+        wheel_action = diff_controller.forward(drive_command)
+        velocities[joint_index["left_wheel_joint"]] = (
+            WHEEL_VELOCITY_SIGNS["left_wheel_joint"] * float(wheel_action.joint_velocities[0])
+        )
+        velocities[joint_index["right_wheel_joint"]] = (
+            WHEEL_VELOCITY_SIGNS["right_wheel_joint"] * float(wheel_action.joint_velocities[1])
+        )
 
     position_targets = arm_targets(phase, motion)
     for name in LEFT_ARM_JOINTS + RIGHT_ARM_JOINTS + FINGER_JOINTS:
@@ -315,7 +355,7 @@ def apply_motion(robot: Robot, frame_index: int, frame_count: int, motion: dict[
     robot.get_articulation_controller().apply_action(
         ArticulationAction(joint_positions=positions, joint_velocities=velocities)
     )
-    return positions, velocities
+    return positions, velocities, drive_command
 
 
 def main() -> None:
@@ -350,11 +390,17 @@ def main() -> None:
     writer.initialize(output_dir=str(output_dir), rgb=True)
 
     world.reset()
-    robot = Robot(prim_path=args.robot_prim, name="dkk2_robot")
+    robot = Robot(prim_path=args.robot_prim, name="dkk5_diff_robot")
     robot.initialize()
     robot.post_reset()
     motion = build_motion_targets(robot)
     configure_control_modes(robot, motion)
+    diff_controller = DifferentialController(
+        name="dkk5_diff_controller",
+        wheel_radius=args.wheel_radius,
+        wheel_base=args.wheel_base,
+        max_wheel_speed=args.max_wheel_speed,
+    )
     initial_joint_positions = np.array(robot.get_joint_positions(), dtype=np.float64)
     initial_world_pose = robot.get_world_pose()
 
@@ -367,8 +413,11 @@ def main() -> None:
     start = time.time()
     last_commanded_positions = np.full(motion["dof_count"], np.nan, dtype=np.float64)
     last_commanded_velocities = np.full(motion["dof_count"], np.nan, dtype=np.float64)
+    last_drive_command = np.zeros(2, dtype=np.float64)
     for index in range(args.frames):
-        last_commanded_positions, last_commanded_velocities = apply_motion(robot, index, args.frames, motion)
+        last_commanded_positions, last_commanded_velocities, last_drive_command = apply_motion(
+            robot, index, args.frames, motion, diff_controller
+        )
         simulation_app.update()
         rep.orchestrator.step()
         if index == 0 or (index + 1) % max(1, args.frames // 6) == 0:
@@ -404,15 +453,21 @@ def main() -> None:
         "height": args.height,
         "fps": args.fps,
         "warmup_steps": args.warmup_steps,
+        "settle_seconds": args.settle_seconds,
         "elapsed_seconds": elapsed,
         "camera_position": args.camera_position,
         "look_at": args.look_at,
         "wheel_speed": args.wheel_speed,
-        "turn_speed": args.turn_speed,
+        "angular_speed": args.angular_speed,
+        "wheel_radius": args.wheel_radius,
+        "wheel_base": args.wheel_base,
+        "max_wheel_speed": args.max_wheel_speed,
         "headless": args.headless,
         "active_gpu": args.active_gpu,
         "multi_gpu": args.multi_gpu,
+        "animate_arms": args.animate_arms,
         "wheel_joints": WHEEL_JOINTS,
+        "wheel_velocity_signs": WHEEL_VELOCITY_SIGNS,
         "left_arm_joints": LEFT_ARM_JOINTS,
         "right_arm_joints": RIGHT_ARM_JOINTS,
         "finger_joints": FINGER_JOINTS,
@@ -422,8 +477,9 @@ def main() -> None:
         "final_base_position": np.asarray(final_world_pose[0]).tolist(),
         "final_base_orientation_wxyz": np.asarray(final_world_pose[1]).tolist(),
         "initial_joint_positions": safe_float_list(initial_joint_positions),
-        "last_commanded_joint_positions": finite_or_none(last_commanded_positions),
-        "last_commanded_joint_velocities": finite_or_none(last_commanded_velocities),
+        "last_commanded_joint_positions": safe_float_list(last_commanded_positions),
+        "last_commanded_joint_velocities": safe_float_list(last_commanded_velocities),
+        "last_drive_command": safe_float_list(last_drive_command),
     }
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     log(f"manifest={manifest_path}")
