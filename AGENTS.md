@@ -22,6 +22,17 @@ There is no package build step. Run workflows from the repository root.
 
 Override defaults with environment variables such as `ISAAC_SIM_DIR`, `SCENE_PATH`, `RUN_DIR`, `ACTIVE_GPU`, `WIDTH`, `HEIGHT`, and `FPS`.
 
+# Codex Project Memory
+
+Before starting any task:
+- Read `.codex/TASK_HISTORY.md`
+- Read `.codex/DECISIONS.md`
+
+After finishing any task:
+- Append a short summary to `.codex/TASK_HISTORY.md`
+- Include changed files, commands run, results, unresolved issues, and next steps
+- Append architectural decisions to `.codex/DECISIONS.md`
+
 ## Coding Style & Naming Conventions
 
 Python uses 4-space indentation, `argparse` for command-line options, `pathlib.Path` for filesystem paths, and JSON manifests for run metadata. Keep Isaac Sim imports that require `SimulationApp` after app initialization, using `# noqa: E402` where needed.
