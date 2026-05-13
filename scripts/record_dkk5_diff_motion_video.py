@@ -50,6 +50,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--crf", type=int, default=18)
     parser.add_argument("--camera-position", type=parse_tuple, default=(-4.0, 4.0, 2.8))
     parser.add_argument("--look-at", type=parse_tuple, default=(-1.6, 0.3, 1.1))
+    parser.add_argument(
+        "--camera-prim",
+        default="",
+        help="Optional existing Camera prim path to render from, e.g. /World/DKK2/RJ2506/cam_head/head_camera_sensor.",
+    )
     parser.add_argument("--reference-prim", default="/World/DKK2")
     parser.add_argument("--robot-prim", default="/World/DKK2/RJ2506/base_link")
     parser.add_argument("--dome-intensity", type=float, default=1800.0)
@@ -384,8 +389,15 @@ def main() -> None:
     prim_count, mesh_count = count_scene(stage)
     log(f"prims={prim_count} meshes={mesh_count}")
 
-    camera = rep.create.camera(position=args.camera_position, look_at=args.look_at)
-    render_product = rep.create.render_product(camera, (args.width, args.height))
+    if args.camera_prim:
+        camera_prim = stage.GetPrimAtPath(args.camera_prim)
+        if not camera_prim.IsValid() or not camera_prim.IsA(UsdGeom.Camera):
+            raise RuntimeError(f"Camera prim not found or not a UsdGeom.Camera: {args.camera_prim}")
+        log(f"using_camera_prim={args.camera_prim}")
+        render_product = rep.create.render_product(args.camera_prim, (args.width, args.height))
+    else:
+        camera = rep.create.camera(position=args.camera_position, look_at=args.look_at)
+        render_product = rep.create.render_product(camera, (args.width, args.height))
     writer = rep.WriterRegistry.get("BasicWriter")
     writer.initialize(output_dir=str(output_dir), rgb=True)
 
@@ -457,6 +469,7 @@ def main() -> None:
         "elapsed_seconds": elapsed,
         "camera_position": args.camera_position,
         "look_at": args.look_at,
+        "camera_prim": args.camera_prim or None,
         "wheel_speed": args.wheel_speed,
         "angular_speed": args.angular_speed,
         "wheel_radius": args.wheel_radius,
