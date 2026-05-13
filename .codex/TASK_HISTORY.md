@@ -1,3 +1,45 @@
+## 2026-05-13T04:52:27Z - Recorded simulation next-step recommendations
+
+- Changed files:
+  - `docs/simulation_next_steps.md`: added prioritized simulation next steps and the suggested immediate task.
+  - `.codex/TASK_HISTORY.md`: appended this summary.
+- Commands run:
+  - `sed -n '1,120p' .codex/TASK_HISTORY.md`
+  - `sed -n '1,120p' .codex/DECISIONS.md`
+  - `rg --files docs .codex`
+  - `date -u +%Y-%m-%dT%H:%M:%SZ`
+- Results:
+  - Captured the recommendations in a durable project document.
+  - No simulation code was changed.
+- Unresolved issues:
+  - The next implementation priority still needs to be selected before coding begins.
+- Next steps:
+  - Start with DKK5 carry workflow task-success metrics unless project direction changes.
+
+## 2026-05-13T04:50:57Z - Simulation next-work assessment
+
+- Changed files:
+  - `.codex/TASK_HISTORY.md`: appended this assessment summary.
+- Commands run:
+  - `sed -n '1,220p' .codex/TASK_HISTORY.md`
+  - `sed -n '1,220p' .codex/DECISIONS.md`
+  - `rg --files`
+  - `sed -n '1,220p' docs/dkk2_video_work_notes.md`
+  - `sed -n '1,220p' docs/dkk2_replicator_rendering_workflow.md`
+  - `find scripts -maxdepth 1 -type f -name '*.sh' -o -name '*.py' | sort`
+  - `find outputs -maxdepth 2 -name 'manifest.json' -o -name '*manifest*.json' | sort | tail -40`
+  - `rg -n "TODO|FIXME|Next steps|Unresolved|unresolved|warning|warn|manifest|collision|physics|drive|carry|camera" docs scripts .codex -S`
+  - `sed -n '1,220p' scripts/record_dkk5_diff_motion_video.py`
+  - `sed -n '1,220p' scripts/record_dkk5_diff_carry_video.py`
+- Results:
+  - Reviewed current DKK2/DKK5 simulation, rendering, recording, camera-sensor, and manifest coverage.
+  - No simulation code was changed.
+- Unresolved issues:
+  - Existing source-scene material/conveyor texture warnings remain documented.
+  - Need project-level decision on whether next priority is physics fidelity, task success metrics, sensor dataset output, or scenario coverage.
+- Next steps:
+  - Prioritize physics/contact validation, objective metrics in manifests, scenario matrix expansion, and repeatable regression smoke tests.
+
 ## 2026-04-28T03:36:58Z - DKK5 remaining camera validations
 
 - Changed files:
